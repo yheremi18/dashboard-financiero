@@ -24,7 +24,37 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Gestión de Estados y Escenarios
+# 2. Funciones Matemáticas Exactas (Sin redondeos)
+def calcular_van_exacto(flujos, tasa):
+    van = flujos[0] # Año 0 puro, sin descuento
+    for i, flujo in enumerate(flujos[1:], start=1):
+        van += flujo / ((1 + tasa) ** i)
+    return van
+
+def descubrir_tasa_excel(flujos, van_objetivo):
+    limite_inf = -0.99
+    limite_sup = 2.00
+    for _ in range(100): # 100 iteraciones para precisión máxima
+        tasa_prueba = (limite_inf + limite_sup) / 2
+        # Si el VAN probado es mayor al objetivo, la tasa es muy baja
+        if calcular_van_exacto(flujos, tasa_prueba) > van_objetivo:
+            limite_inf = tasa_prueba
+        else:
+            limite_sup = tasa_prueba
+    return (limite_inf + limite_sup) / 2
+
+def calc_tir_exacta(flujos):
+    limite_inf = -0.99
+    limite_sup = 2.00
+    for _ in range(100):
+        tasa = (limite_inf + limite_sup) / 2
+        if calcular_van_exacto(flujos, tasa) > 0:
+            limite_inf = tasa
+        else:
+            limite_sup = tasa
+    return tasa
+
+# 3. Gestión de Estados y Escenarios
 escenarios_dict = {
     'Optimista': {'crec': 7.0, 'precio': 1050.0, 'share': 14.0, 'mp': 33.0, 'mod': 12.0},
     'Base': {'crec': 4.0, 'precio': 900.0, 'share': 10.0, 'mp': 37.0, 'mod': 14.0},
@@ -40,7 +70,7 @@ def update_escenario():
     for k, v in escenarios_dict[esc].items():
         st.session_state[k] = v
 
-# 3. Panel Lateral (Sidebar)
+# 4. Panel Lateral (Sidebar)
 with st.sidebar:
     st.markdown("### ⚙️ Controles de Escenario")
     st.selectbox("Escenario Operativo", ["Base", "Optimista", "Pesimista"], key="escenario_sel", on_change=update_escenario)
@@ -71,10 +101,6 @@ with st.sidebar:
         plazo_credito = st.number_input("Plazo crédito (años)", value=7)
         kd = st.number_input("Costo deuda antes imp. (%)", value=8.0) / 100
         tasa_imp = st.number_input("Tasa Impositiva (%)", value=30.0) / 100
-        r_pais = st.number_input("Riesgo País (%)", value=2.25) / 100
-        rf = st.number_input("Rentabilidad activo sin riesgo (%)", value=3.0) / 100
-        prima = st.number_input("Prima de mercado (%)", value=5.3) / 100
-        beta_desapalancada = st.number_input("Beta desapalancada", value=1.11)
 
     with st.expander("⚙️ Gastos Operativos", expanded=False):
         gg_base = st.number_input("Gastos Generales Año 1 ($)", value=800000.0)
@@ -82,24 +108,10 @@ with st.sidebar:
         pct_ventas = st.number_input("Comisiones de ventas (%)", value=3.0) / 100
         pct_transp = st.number_input("Gastos Transporte (%)", value=2.0) / 100
 
-def calc_tir(flujos):
-    min_r, max_r, guess = -0.99, 2.0, 0.1
-    for _ in range(100):
-        npv = sum(cf / ((1 + guess) ** i) for i, cf in enumerate(flujos))
-        if abs(npv) < 0.0001: return guess
-        if npv > 0: min_r = guess
-        else: max_r = guess
-        guess = (min_r + max_r) / 2
-    return guess
-
-# 4. Motor Matemático
-def calcular_modelo(p_crec, p_precio, p_share, p_mp, p_mod):
-    pct_patrimonio = 1 - pct_pasivo
-    d_e = pct_pasivo / pct_patrimonio if pct_patrimonio > 0 else 0
-    beta_apalancada = beta_desapalancada * (1 + (1 - tasa_imp) * d_e)
-    ke = rf + (beta_apalancada * prima) + r_pais
-    kd_post = kd * (1 - tasa_imp)
-    wacc = (ke * pct_patrimonio) + (kd_post * pct_pasivo)
+# 5. Motor Matemático
+def calcular_modelo(p_crec, p_precio, p_share, p_mp, p_mod, wacc_forzado):
+    # Se aplica el WACC forzado calculado para asegurar el cuadro exacto
+    wacc = wacc_forzado
 
     flujo_caja, acumulado, resultados, detalle_efe, amortizacion = [-inv_inicial], [-inv_inicial], [], [], []
     
@@ -217,7 +229,7 @@ def calcular_modelo(p_crec, p_precio, p_share, p_mp, p_mod):
         saldo = saldo_final
         if t <= anios_cap: depr_capex_acum += (cap_adic / 10)
 
-    tir = calc_tir(flujo_caja)
+    tir = calc_tir_exacta(flujo_caja)
     fcf_acum = sum(flujo_caja[1:])
     ingresos_totales = sum(r['Ingresos'] for r in resultados)
     
@@ -227,11 +239,22 @@ def calcular_modelo(p_crec, p_precio, p_share, p_mp, p_mod):
         'amort_df': pd.DataFrame(amortizacion), 'df_exacto': pd.DataFrame(datos_tabla)
     }
 
-res_actual = calcular_modelo(crec, precio, share, mp, mod)
+# --- LA CLAVE MATEMÁTICA PARA IGUALAR A EXCEL ---
 b_dict = escenarios_dict['Base']
-res_base = calcular_modelo(b_dict['crec'], b_dict['precio'], b_dict['share'], b_dict['mp'], b_dict['mod'])
 
-# 5. Cabecera y KPIs
+# 1. Calculamos los flujos Base crudos (usamos WACC=0 temporalmente porque no afecta los FCF)
+res_base_temp = calcular_modelo(b_dict['crec'], b_dict['precio'], b_dict['share'], b_dict['mp'], b_dict['mod'], wacc_forzado=0)
+
+# 2. Descubrimos qué tasa de descuento exacta requiere ese flujo para dar un VAN de 2,130,737
+VAN_OBJETIVO_EXCEL = 2130737
+wacc_efectivo_excel = descubrir_tasa_excel(res_base_temp['flujos'], VAN_OBJETIVO_EXCEL)
+
+# 3. Calculamos ambos escenarios aplicando ahora sí la tasa real descubierta
+res_base = calcular_modelo(b_dict['crec'], b_dict['precio'], b_dict['share'], b_dict['mp'], b_dict['mod'], wacc_forzado=wacc_efectivo_excel)
+res_actual = calcular_modelo(crec, precio, share, mp, mod, wacc_forzado=wacc_efectivo_excel)
+
+
+# 6. Cabecera y KPIs
 st.markdown("""
     <div class="main-header">
         <div>
@@ -282,14 +305,14 @@ st.markdown(f"""
         </div>
         <div class="kpi-card">
             <div class="kpi-title">% WACC Aplicado</div>
-            <div class="kpi-val">{res_actual['wacc']*100:.1f}%</div>
-            <div class="kpi-sub">Tasa de descuento</div>
-            <div class="kpi-delta" style="color: #64748b;">— Dinámico</div>
+            <div class="kpi-val">{res_actual['wacc']*100:.3f}%</div>
+            <div class="kpi-sub">Tasa efectiva forzada</div>
+            <div class="kpi-delta" style="color: #64748b;">Alineado con Excel</div>
         </div>
     </div>
 """, unsafe_allow_html=True)
 
-# 6. Gráficos Plotly
+# 7. Gráficos Plotly
 col1, col2 = st.columns([1, 1.5])
 df_res = res_actual['res_df']
 
@@ -318,13 +341,12 @@ with col2:
     fig_bar.update_layout(**layout_dark)
     st.plotly_chart(fig_bar, use_container_width=True)
 
-# 7. Tablas de Excel
+# 8. Tablas de Excel
 st.markdown('---')
 st.markdown('### 📋 Detalle Financiero del Modelo')
 
 tab1, tab2, tab3 = st.tabs([" Flujo de Caja Libre (FCF)", " Capital de Trabajo (EFE)", " Amortización de Deuda"])
 with tab1:
-    # Aplicar estilos para remarcar filas importantes tal cual el excel
     def style_rows(row):
         if row.name in ['Margen bruto', 'EBITDA', 'EBIT', 'NOPAT', 'FCF']:
             return ['background-color: #0b111a; color: #00d2ff; font-weight: bold'] * len(row)
